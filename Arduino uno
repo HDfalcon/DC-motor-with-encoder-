@@ -1,0 +1,46 @@
+#include <Arduino.h>
+
+#define encA 2
+#define encB 3
+#define dir1 4
+#define dir2 5
+#define pwm 6
+
+int32_t step;
+
+void ENCA();
+void drive(uint8_t dir, uint16_t speed);
+
+void setup() {
+    pinMode(dir1, 1);
+    pinMode(dir2, 1);
+    pinMode(pwm, 1);
+    pinMode(encA, 0);
+    pinMode(encB, 0);
+    pinMode(1, 1);
+    digitalWrite(1, 1);
+    Serial.begin(115200);
+
+    attachInterrupt(digitalPinToInterrupt(encA), ENCA, RISING); // High edge
+}
+
+void loop() {
+    static int16_t counter = 0;
+    drive(0, 100);
+    counter ++;
+    Serial.println(step/128);
+}
+
+void ENCA(){
+    int ENCB = digitalRead(encB);
+    if(ENCB > 0) {
+        step ++;
+    }
+    else{step --;}
+}
+
+void drive(uint8_t dir, uint16_t speed){
+    if(dir == 1){digitalWrite(dir1, 1); digitalWrite(dir2, 0);}
+    else{digitalWrite(dir1, 0); digitalWrite(dir2, 1);}
+    analogWrite(pwm, speed);
+}
