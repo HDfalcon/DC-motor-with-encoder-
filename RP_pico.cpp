@@ -3,6 +3,8 @@
 #include "hardware/timer.h"
 #include "hardware/gpio.h"
 #include "hardware/pwm.h"
+#include "hardware/irq.h"
+#include "pico/multicore.h"
 
 #define LED PICO_DEFAULT_LED_PIN
 #define encA 2
@@ -11,15 +13,26 @@
 #define dir2 5
 #define pwm 6
 
-int32_t step = 0;
+float targetVel = 40;
+
+volatile uint32_t velocity, currTime, prevTime;
+float Kp=3, Ki=13;
+uint32_t cTime, pTime, lTime;
+float rpm, preRpm, filtRpm;
+float err, errIntegral;
 
 void encoder_callback(uint gpio, uint32_t events);
 void drive(uint8_t dir, uint8_t duty, uint slice_num);
 uint pwm_setup(uint8_t pin);
+float f_abs(float var);
+
+critical_section_t crit_velocity;
 
 int main(){
     stdio_init_all();
     sleep_ms(100);
+
+    critical_section_init(&crit_velocity);
 
     //  LED
     gpio_init(LED);
@@ -46,30 +59,52 @@ int main(){
 
     //  Interrupt Definition
     gpio_set_irq_enabled_with_callback(encA, 0x04, 1, encoder_callback);
-
+                                        // 0x04 == GPIO_IRQ_EDGE_RISE
     //  PWM SETUP
     uint sliceNum = pwm_setup(pwm);
     drive(1, 50, sliceNum);
     while(1){
-        gpio_put(LED, 1);
-        drive(1, 80, sliceNum);
-        sleep_ms(500);
+        pTime = cTime;
+        cTime = time_us_32();   // taking loop time in microseconds
+        lTime = cTime - pTime;
 
-        gpio_put(LED, 0);
-        drive(0, 80, sliceNum);
-        sleep_ms(100);
-        printf("%d \n",step);
+        //handling velocity in critical section
+        critical_section_enter_blocking(&crit_velocity);
+        rpm = (velocity * 60 / (16*20));
+        critical_section_exit(&crit_velocity);
+        //filtering velocity (25hz cutoff frequency-low pass filter)
+        filtRpm = (0.854 * filtRpm) + (0.0728 * rpm) + (0.0728 * preRpm);
+        preRpm = rpm;
+
+        err = targetVel - filtRpm;
+        errIntegral = errIntegral + err*lTime/1e6;
+
+        float u = Kp*err + Ki*errIntegral;
+        float pwr = (int)f_abs(u);
+
+        if(pwr > 100){pwr = 100;}
+        if(u < 0){drive(0, pwr, sliceNum);}
+        else{drive(1, pwr, sliceNum);}
+        printf("%f \n", filtRpm);
+        sleep_ms(1);
     }
     return 0;
 }
 //  CALLBACK
 void encoder_callback(uint gpio, uint32_t events){
     int ENCB = gpio_get(encB);
-    if(ENCB > 0){step++;}
-    else{step--;}
+    int8_t increment = 0;
+    if(ENCB > 0){increment = +1;}
+    else{increment = -1;}
+    currTime = time_us_32();
+    float dTime = ((float)(currTime - prevTime)/1e6);
+    velocity = increment / dTime;
+    prevTime = currTime;
 }
 //  motor driver
 void drive(uint8_t dir, uint8_t duty, uint slice_num){
+        uint32_t level = (12500 * duty) / 100;
+        pwm_set_chan_level(slice_num, pwm_gpio_to_channel(pwm), level);
     if(dir == 1){ 
         gpio_put(dir1, 1);
         gpio_put(dir2, 0);
@@ -78,8 +113,6 @@ void drive(uint8_t dir, uint8_t duty, uint slice_num){
         gpio_put(dir1, 0);
         gpio_put(dir2, 1);
     }
-        uint32_t level = (12500 * duty) / 100;
-        pwm_set_chan_level(slice_num, pwm_gpio_to_channel(pwm), level);
 }
 //  setting up pwm pin and getting slice number
 uint pwm_setup(uint8_t pin){
@@ -89,3 +122,8 @@ uint pwm_setup(uint8_t pin){
         pwm_set_enabled(slice_num, true);
         return slice_num;
     }
+
+float f_abs(float var){
+    if (var < 0.0){var *= -1;}
+    return var;
+}
